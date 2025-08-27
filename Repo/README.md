@@ -168,3 +168,45 @@ python -m pytest -s -v --cov=pyswagger --cov-config=.coveragerc --cov-report=htm
   - 'different host for different resource' is no longer supported in Swagger 2.0, only one host and one basePath is allowed in one swagger.json.
   - refer to [Migration Guide](https://github.com/swagger-api/swagger-spec/wiki/Swagger-1.2-to-2.0-Migration-Guide) from Swagger team.
   - The name of body parameters is no longer included in requests, refer to this [issue](https://github.com/mission-liao/pyswagger/issues/13) for details.
+
+
+# Turn 1: Model A response
+
+## Summary
+
+After analyzing the repository and failing tests, I've identified the core issues:
+
+### **Critical Problems Found:**
+
+1. **Context.__exit__ is completely broken** - It sets `obj = None` and assigns that to parent, so no Swagger objects are ever created during parsing.
+
+2. **FieldMeta metaclass is incomplete** - Has a `pass` statement where field inheritance from parent classes should be implemented, breaking multi-level inheritance.
+
+3. **Multiple stub implementations** - Key utility functions like `_diff_` and `get_or_none` have been replaced with stub code that returns incorrect values.
+
+4. **BaseObj methods returning incorrect values** - Methods like `compare`, `_parent_`, `_children_`, and `_field_names_` are either stubbed or broken.
+
+5. **Field default value sharing** - Mutable default values (lists/dicts) are being shared between instances instead of creating copies.
+
+### **Proposed Fix Approach:**
+
+**Phase 1: Core Object Creation**
+- Fix `Context.__exit__` to properly instantiate `__swagger_ref_object__`
+- Implement the object creation and assignment flow correctly
+
+**Phase 2: Field Inheritance**
+- Complete the FieldMeta metaclass to merge fields from all parent classes
+- Ensure proper field initialization with independent default values
+
+**Phase 3: Utility Functions**
+- Implement proper `_diff_` function for comparing structures
+- Fix `get_or_none` to navigate nested attributes
+
+**Phase 4: BaseObj Methods**
+- Implement proper comparison, parent/children tracking
+- Fix field name reporting
+
+**Phase 5: Scope Separator Feature**
+- After core fixes, add the custom scope separator functionality mentioned in the PR
+
+The issues appear to be incomplete/broken implementations rather than subtle bugs. The code has clear placeholder/stub sections that need to be properly implemented. Once these fundamental issues are resolved, the tests should pass and the new scope separator feature can be added on top of a working foundation.
