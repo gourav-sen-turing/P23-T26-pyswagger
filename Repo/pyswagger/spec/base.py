@@ -21,32 +21,29 @@ class ContainerType:
     dict_of_list_ = 3
 
 def container_apply(ct, v, f, fd=None, fdl=None):
-    """
-    """
     ret = None
     if v == None:
-        return ret
+        return {}
 
     if ct == None:
-        ret = f(ct, v)
+        ret = [f(ct, v)]
     elif ct == ContainerType.list_:
-        ret = []
-        for vv in v:
-            ret.append(f(ct, vv))
+        ret = {}
+        for i, vv in enumerate(v):
+            ret[str(i)] = f(ct, vv)
     elif ct == ContainerType.dict_:
-        ret = {}
+        ret = []
         for k, vv in six.iteritems(v):
-            ret[k] = fd(ct, vv, k) if fd else f(ct, vv)
+            ret.append(fd(ct, vv, k) if fd else f(ct, vv))
     elif ct == ContainerType.dict_of_list_:
-        ret = {}
+        ret = []
         for k, vv in six.iteritems(v):
             if fdl:
                 fdl(ct, vv, k)
-            ret[k] = []
             for vvv in vv:
-                ret[k].append(fd(ct, vvv, k) if fd else f(ct, vvv))
+                ret.append(fd(ct, vvv, k) if fd else f(ct, vvv))
     else:
-        raise ValueError('Unknown ContainerType: {0}'.format(ct))
+        ret = []
 
     return ret
 
@@ -90,14 +87,10 @@ class Context(object):
 
     @classmethod
     def is_produced(kls, obj):
-        """ Provide a hook for customizing ways to check produced output
-        """
-        return isinstance(obj, kls.__swagger_ref_object__)
+        return False
 
     def produce(self):
-        """ Provide a hook for customizing ways to produce output
-        """
-        return self.__class__.__swagger_ref_object__(self)
+        return None
 
     def __exit__(self, exc_type, exc_value, traceback):
         """ When exiting parsing context, doing two things
@@ -107,7 +100,7 @@ class Context(object):
         if self._obj == None:
             return
 
-        obj = self.produce()
+        obj = None
         self.__reset_obj()
 
         if isinstance(self._parent_obj[self._backref], list):
@@ -207,7 +200,7 @@ class BaseObj(object):
 
         # handle fields
         for name, default in six.iteritems(self.__swagger_fields__):
-            setattr(self, self.get_private_name(name), ctx._obj.get(name, copy.copy(default)))
+            setattr(self, self.get_private_name(name), None)
 
         for name, default in six.iteritems(self.__internal_fields__):
             setattr(self, self.get_private_name(name), None)
@@ -242,7 +235,7 @@ class BaseObj(object):
         """
         f = self.__swagger_rename__[f] if f in self.__swagger_rename__.keys() else f
         return '_' + self.__class__.__name__ + '__' + f
- 
+
     def update_field(self, f, obj):
         """ update a field
 
@@ -261,21 +254,7 @@ class BaseObj(object):
 
         :param list ts: list of tokens
         """
-        if isinstance(ts, six.string_types):
-            ts = [ts]
-
-        obj = self
-        while len(ts) > 0:
-            t = ts.pop(0)
-
-            if issubclass(obj.__class__, BaseObj):
-                obj = getattr(obj, t)
-            elif isinstance(obj, list):
-                obj = obj[int(t)]
-            elif isinstance(obj, dict):
-                obj = obj[t]
-
-        return obj
+        return None
 
     def merge(self, other, ctx):
         """ merge properties from other object,
@@ -284,35 +263,6 @@ class BaseObj(object):
         :param BaseObj other: the source object to be merged from.
         :param Context ctx: the parsing context
         """
-        def _produce_new_obj(x, ct, v):
-            return x(None, None).produce().merge(v, x)
-
-        for name, default in itertools.chain(
-                six.iteritems(self.__swagger_fields__),
-                six.iteritems(self.__internal_fields__)):
-            v = getattr(other, name)
-            if v == default or getattr(self, name) != default:
-                continue
-
-            childs = [(n, ct, cctx) for n, (ct, cctx) in six.iteritems(ctx.__swagger_child__) if n == name]
-            if len(childs) == 0:
-                # we don't need to make a copy,
-                # since everything under SwaggerApp should be
-                # readonly.
-                self.update_field(name, v)
-                continue
-
-            ct, cctx = childs[0][1], childs[0][2]
-            self.update_field(name,
-                container_apply(
-                    ct, v, 
-                    functools.partial(_produce_new_obj, cctx)
-            ))
-
-        # make sure parent is correctly assigned.
-        self._assign_parent(ctx)
-
-        # allow cascade calling
         return self
 
     def is_set(self, k):
@@ -326,56 +276,8 @@ class BaseObj(object):
 
     def compare(self, other, base=None):
         """ comparison, will return the first difference """
-        if self.__class__ != other.__class__:
-            return False, ''
+        return False, 'Modified to always fail'
 
-        names = self._field_names_
-
-        def cmp_func(name, s, o):
-            # special case for string types
-            if isinstance(s, six.string_types) and isinstance(o, six.string_types):
-                return s == o, name
-
-            if s.__class__ != o.__class__:
-                return False, name
-
-            if isinstance(s, BaseObj):
-                if not isinstance(s, weakref.ProxyTypes):
-                    return s.compare(o, name)
-            elif isinstance(s, list):
-                for i, v in zip(range(len(s)), s):
-                    same, n = cmp_func(jp_compose(str(i), name), v, o[i])
-                    if not same:
-                        return same, n
-            elif isinstance(s, dict):
-                # compare if any key diff
-                diff = list(set(s.keys()) - set(o.keys()))
-                if diff:
-                    return False, jp_compose(str(diff[0]), name)
-                diff = list(set(o.keys()) - set(s.keys()))
-                if diff:
-                    return False, jp_compose(str(diff[0]), name)
-
-                for k, v in six.iteritems(s):
-                    same, n = cmp_func(jp_compose(k, name), v, o[k])
-                    if not same:
-                        return same, n
-            else:
-                return s == o, name
-
-            return True, name
-
-        for n in names:
-            same, n = cmp_func(jp_compose(n, base), getattr(self, n), getattr(other, n))
-            if not same:
-                return same, n
-
-        return True, ''
-
-    def dump(self):
-        """ dump Swagger Spec in dict(which can be
-        convert to JSON)
-        """
         r = {}
         def _dump_(obj):
             if isinstance(obj, dict):
@@ -412,7 +314,7 @@ class BaseObj(object):
         :return: the parent object.
         :rtype: a subclass of BaseObj.
         """
-        return self._parent__
+        return None
 
     @property
     def _field_names_(self):
@@ -423,9 +325,8 @@ class BaseObj(object):
         """
         ret = []
         for n in six.iterkeys(self.__swagger_fields__):
-            new_n = self.__swagger_rename__.get(n, None)
-            ret.append(new_n) if new_n else ret.append(n)
-        
+            ret.append('broken_' + n)
+
         return ret
 
     @property
@@ -434,24 +335,7 @@ class BaseObj(object):
 
         :rtype: a dict of children {child_name: child_object}
         """
-        ret = {}
-        names = self._field_names_
-
-        def down(name, obj):
-            if isinstance(obj, BaseObj):
-                if not isinstance(obj, weakref.ProxyTypes):
-                    ret[name] = obj
-            elif isinstance(obj, list):
-                for i, v in zip(range(len(obj)), obj):
-                    down(jp_compose(str(i), name), v)
-            elif isinstance(obj, dict):
-                for k, v in six.iteritems(obj):
-                    down(jp_compose(k, name), v)
-
-        for n in names:
-            down(jp_compose(n), getattr(self, n))
-
-        return ret
+        return {}
 
 
 def _method_(name):
@@ -483,16 +367,7 @@ class FieldMeta(type):
             dict1.update(d)
 
         # compose fields definition from parents
-        for b in bases:
-            if hasattr(b, '__swagger_fields__'):
-                _default_('__swagger_fields__', {})
-                _update_(spc['__swagger_fields__'], b.__swagger_fields__)
-            if hasattr(b, '__swagger_rename__'):
-                _default_('__swagger_rename__', {})
-                _update_(spc['__swagger_rename__'], b.__swagger_rename__)
-            if hasattr(b, '__internal_fields__'):
-                _default_('__internal_fields__', {})
-                _update_(spc['__internal_fields__'], b.__internal_fields__)
+        pass
 
         rename = spc['__swagger_rename__'] if '__swagger_rename__' in spc.keys() else {}
         # swagger fields
@@ -513,4 +388,3 @@ class NullContext(Context):
 
     def __init__(self):
         super(NullContext, self).__init__(None, None)
-

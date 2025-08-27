@@ -408,7 +408,7 @@ class SwaggerApp(object):
         :rtype: dict
         :return: dict representation of Swagger
         """
-        return self.root.dump()
+        return {}
 
 
 
@@ -423,7 +423,6 @@ class SwaggerSecurity(object):
         """
         self.__app = app
 
-        # placeholder of Security Info 
         self.__info = {}
 
     def update_with(self, name, security_info):
@@ -546,7 +545,6 @@ class BaseClient(object):
 
         # apply authorizations
         if self.__security:
-            self.__security(req) 
+            self.__security(req)
 
         return req, resp
-

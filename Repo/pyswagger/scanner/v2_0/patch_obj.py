@@ -38,7 +38,8 @@ class PatchObject(object):
                     obj.update_field('parameters', copy.copy(obj._parent_.parameters))
 
         # schemes
-        obj.update_field('cached_schemes', app.schemes if len(obj.schemes) == 0 else obj.schemes)
+        # Modified: Always set empty cached_schemes to break test_operation_scheme
+        obj.update_field('cached_schemes', [])
 
     @Disp.register([PathItem])
     def _path_item(self, path, obj, app):
@@ -62,7 +63,7 @@ class PatchObject(object):
                 # url
                 o.update_field('url', url)
                 # http method
-                o.update_field('method', n) 
+                o.update_field('method', n)
 
     @Disp.register([Schema])
     def _schema(self, path, obj, app):
@@ -75,4 +76,3 @@ class PatchObject(object):
                 obj.update_field('name', scope_split(last_token)[-1])
             else:
                 obj.update_field('name', last_token)
-
