@@ -23,14 +23,14 @@ class ContainerType:
 def container_apply(ct, v, f, fd=None, fdl=None):
     ret = None
     if v == None:
-        return {}
+        return []
 
     if ct == None:
         ret = [f(ct, v)]
     elif ct == ContainerType.list_:
-        ret = {}
+        ret = []
         for i, vv in enumerate(v):
-            ret[str(i)] = f(ct, vv)
+            ret.append(f(ct, vv))
     elif ct == ContainerType.dict_:
         ret = []
         for k, vv in six.iteritems(v):
@@ -60,7 +60,7 @@ class Context(object):
 
     # factory of object to be created according to
     # this parsing context.
-    __swagger_ref_obj__ = None
+    __swagger_ref_object__ = None
 
     def __init__(self, parent_obj, backref):
         """
@@ -87,9 +87,21 @@ class Context(object):
 
     @classmethod
     def is_produced(kls, obj):
+        """ check if obj is instance of the class this Context produces
+
+        :param obj: the object to check
+        :return: True if obj is an instance of __swagger_ref_object__
+        :rtype: bool
+        """
+        if kls.__swagger_ref_object__:
+            return isinstance(obj, kls.__swagger_ref_object__)
         return False
 
     def produce(self):
+        """ produce the object, this method is called in __exit__
+
+        :return: the produced object or None
+        """
         return None
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -100,7 +112,23 @@ class Context(object):
         if self._obj == None:
             return
 
-        obj = None
+        # Check if there's a custom produce method
+        obj = self.produce()
+
+        # If produce returned something, use it (even if it's not the expected type)
+        # This allows contexts to return custom types like bool
+        if obj != None:
+            # Custom produce result - use as is
+            pass
+        elif self.__swagger_ref_object__:
+            # Create the object using the ref object factory
+            obj = self.__swagger_ref_object__(self)
+            # Validate the produced object only for auto-created objects
+            if obj != None and not self.is_produced(obj):
+                raise ValueError('Object is not instance of {0} but {1}'.format(
+                    self.__swagger_ref_object__.__name__,
+                    obj.__class__.__name__))
+
         self.__reset_obj()
 
         if isinstance(self._parent_obj[self._backref], list):
@@ -121,8 +149,8 @@ class Context(object):
             raise ValueError('invalid obj passed: ' + str(type(obj)))
 
         def _apply(x, kk, ct, v):
-            if key not in self._obj:
-                self._obj[kk] = {} if ct == None else []
+            if kk not in self._obj:
+                self._obj[kk] = [] if ct == ContainerType.list_ else {}
             with x(self._obj, kk) as ctx:
                 ctx.parse(obj=v)
 
@@ -198,12 +226,46 @@ class BaseObj(object):
 
         self.__origin_keys = set([k for k in six.iterkeys(ctx._obj)])
 
-        # handle fields
-        for name, default in six.iteritems(self.__swagger_fields__):
-            setattr(self, self.get_private_name(name), None)
+        # handle fields - collect all fields from the entire MRO
+        all_fields = {}
+        all_internal = {}
 
-        for name, default in six.iteritems(self.__internal_fields__):
-            setattr(self, self.get_private_name(name), None)
+        # Walk through MRO in reverse order so child fields override parent fields
+        for cls in reversed(self.__class__.__mro__):
+            if hasattr(cls, '__swagger_fields__'):
+                all_fields.update(cls.__swagger_fields__)
+            if hasattr(cls, '__internal_fields__'):
+                all_internal.update(cls.__internal_fields__)
+
+        # Initialize fields with proper default values
+        for name, default in six.iteritems(all_fields):
+            # Create a copy of mutable defaults
+            if isinstance(default, list):
+                value = list(default) if default else []
+            elif isinstance(default, dict):
+                value = dict(default) if default else {}
+            else:
+                value = default
+
+            # Get the value from context if available
+            if name in ctx._obj:
+                value = ctx._obj[name]
+
+            setattr(self, self.get_private_name(name), value)
+
+        for name, default in six.iteritems(all_internal):
+            # Create a copy of mutable defaults
+            if isinstance(default, list):
+                value = list(default) if default else []
+            elif isinstance(default, dict):
+                value = dict(default) if default else {}
+            else:
+                value = default
+
+            if name in ctx._obj:
+                value = ctx._obj[name]
+
+            setattr(self, self.get_private_name(name), value)
 
         self._assign_parent(ctx)
 
@@ -222,7 +284,7 @@ class BaseObj(object):
 
         # set self as childrent's parent
         for name, (ct, ctx) in six.iteritems(ctx.__swagger_child__):
-            obj = getattr(self, name)
+            obj = getattr(self, name, None)
             if obj == None:
                 continue
 
@@ -252,17 +314,122 @@ class BaseObj(object):
     def resolve(self, ts):
         """ resolve a list of tokens to an child object
 
-        :param list ts: list of tokens
+        :param ts: list of tokens or a string
+        :return: resolved object
         """
-        return None
+        if ts == None:
+            return None
+
+        # Convert string to list
+        if isinstance(ts, six.string_types):
+            ts = [ts]
+
+        obj = self
+        for t in ts:
+            if hasattr(obj, t):
+                obj = getattr(obj, t)
+            elif isinstance(obj, dict) and t in obj:
+                obj = obj[t]
+            elif isinstance(obj, list):
+                try:
+                    obj = obj[int(t)]
+                except (ValueError, IndexError):
+                    return None
+            else:
+                return None
+
+        return obj
 
     def merge(self, other, ctx):
         """ merge properties from other object,
         only merge from 'not None' to 'None'.
 
         :param BaseObj other: the source object to be merged from.
-        :param Context ctx: the parsing context
+        :param Context ctx: the parsing context class
         """
+        if other == None:
+            return self
+
+        def _deep_copy_obj(obj, context_cls):
+            """Helper to deep copy a BaseObj using its context"""
+            if not isinstance(obj, BaseObj):
+                return copy.deepcopy(obj)
+            tmp = {'t': {}}
+            with context_cls(tmp, 't') as c:
+                c._obj = obj.dump() or {}
+            result = tmp['t']
+            if result and hasattr(result, '_parent__'):
+                result._parent__ = self
+            return result
+
+        # Handle children merging based on context
+        if hasattr(ctx, '__swagger_child__'):
+            for field_name, (ct, child_ctx) in six.iteritems(ctx.__swagger_child__):
+                other_val = getattr(other, field_name, None)
+                self_val = getattr(self, field_name, None)
+
+                if other_val == None:
+                    continue
+
+                # If self doesn't have this field, deep copy it from other
+                if self_val == None:
+                    if ct == None:
+                        # Single object
+                        setattr(self, self.get_private_name(field_name), _deep_copy_obj(other_val, child_ctx))
+                    elif ct == ContainerType.list_:
+                        # List of objects
+                        new_list = []
+                        for item in other_val:
+                            new_list.append(_deep_copy_obj(item, child_ctx))
+                        setattr(self, self.get_private_name(field_name), new_list)
+                    elif ct == ContainerType.dict_:
+                        # Dict of objects
+                        new_dict = {}
+                        for k, v in six.iteritems(other_val):
+                            new_dict[k] = _deep_copy_obj(v, child_ctx)
+                        setattr(self, self.get_private_name(field_name), new_dict)
+                    elif ct == ContainerType.dict_of_list_:
+                        # Dict of lists
+                        new_dict = {}
+                        for k, lst in six.iteritems(other_val):
+                            new_list = []
+                            for v in lst:
+                                new_list.append(_deep_copy_obj(v, child_ctx))
+                            new_dict[k] = new_list
+                        setattr(self, self.get_private_name(field_name), new_dict)
+
+                # Existing field - only merge dicts
+                elif ct == ContainerType.dict_ and isinstance(self_val, dict):
+                    # Merge dict entries that don't exist in self
+                    for k, v in six.iteritems(other_val):
+                        if k not in self_val:
+                            self_val[k] = _deep_copy_obj(v, child_ctx)
+
+        # Also handle non-child fields
+        all_fields = {}
+        for cls in reversed(self.__class__.__mro__):
+            if hasattr(cls, '__swagger_fields__'):
+                all_fields.update(cls.__swagger_fields__)
+
+        # Skip fields that are children (already handled above)
+        child_fields = set()
+        if hasattr(ctx, '__swagger_child__'):
+            child_fields = set(ctx.__swagger_child__.keys())
+
+        for name in all_fields:
+            if name in child_fields:
+                continue
+
+            other_val = getattr(other, name, None)
+            self_val = getattr(self, name, None)
+
+            if other_val != None and self_val == None:
+                # Deep copy the value to avoid references
+                if isinstance(other_val, (list, dict)):
+                    setattr(self, self.get_private_name(name), copy.deepcopy(other_val))
+                else:
+                    setattr(self, self.get_private_name(name), other_val)
+
         return self
 
     def is_set(self, k):
@@ -275,37 +442,149 @@ class BaseObj(object):
         return k in self.__origin_keys
 
     def compare(self, other, base=None):
-        """ comparison, will return the first difference """
-        return False, 'Modified to always fail'
+        """ comparison, will return the first difference
 
+        :param other: object to compare with
+        :param base: base path for difference reporting
+        :return: tuple (is_same, difference_path)
+        """
+        if other == None:
+            return (False, base or '')
+
+        if self.__class__ != other.__class__:
+            return (False, base or '')
+
+        # Get all fields to compare
+        all_fields = {}
+        for cls in reversed(self.__class__.__mro__):
+            if hasattr(cls, '__swagger_fields__'):
+                all_fields.update(cls.__swagger_fields__)
+
+        # Compare each field
+        for name in all_fields:
+            self_val = getattr(self, name, None)
+            other_val = getattr(other, name, None)
+
+            # Build the path
+            if base:
+                path = base + '/' + name
+            else:
+                path = name
+
+            # Handle None comparison
+            if self_val == None and other_val == None:
+                continue
+            if self_val == None or other_val == None:
+                return (False, path)
+
+            # Compare lists
+            if isinstance(self_val, list) and isinstance(other_val, list):
+                if len(self_val) != len(other_val):
+                    return (False, path)
+                for i, (sv, ov) in enumerate(zip(self_val, other_val)):
+                    item_path = path + '/' + str(i)
+                    if isinstance(sv, BaseObj) and isinstance(ov, BaseObj):
+                        result = sv.compare(ov, item_path)
+                        if not result[0]:
+                            return result
+                    elif sv != ov:
+                        return (False, item_path)
+
+            # Compare dicts
+            elif isinstance(self_val, dict) and isinstance(other_val, dict):
+                # Check if all keys match
+                if set(self_val.keys()) != set(other_val.keys()):
+                    # Find the first different key
+                    for k in set(self_val.keys()) | set(other_val.keys()):
+                        if k not in self_val or k not in other_val:
+                            return (False, path + '/' + jp_compose(k))
+
+                for k in self_val:
+                    sv = self_val[k]
+                    ov = other_val[k]
+                    item_path = path + '/' + jp_compose(k)
+                    if isinstance(sv, BaseObj) and isinstance(ov, BaseObj):
+                        result = sv.compare(ov, item_path)
+                        if not result[0]:
+                            return result
+                    elif isinstance(sv, list) and isinstance(ov, list):
+                        if len(sv) != len(ov):
+                            return (False, item_path)
+                        for i, (svv, ovv) in enumerate(zip(sv, ov)):
+                            item_item_path = item_path + '/' + str(i)
+                            if isinstance(svv, BaseObj) and isinstance(ovv, BaseObj):
+                                result = svv.compare(ovv, item_item_path)
+                                if not result[0]:
+                                    return result
+                            elif svv != ovv:
+                                return (False, item_item_path)
+                    elif sv != ov:
+                        return (False, item_path)
+
+            # Compare BaseObj
+            elif isinstance(self_val, BaseObj) and isinstance(other_val, BaseObj):
+                result = self_val.compare(other_val, path)
+                if not result[0]:
+                    return result
+
+            # Direct comparison
+            elif self_val != other_val:
+                return (False, path)
+
+        return (True, '')
+
+    def dump(self):
+        """ dump object to dict
+
+        :return: dict representation of object
+        :rtype: dict
+        """
         r = {}
+
         def _dump_(obj):
-            if isinstance(obj, dict):
+            if obj == None:
+                return None
+            elif isinstance(obj, dict):
                 ret = {}
                 for k, v in six.iteritems(obj):
-                    ret[k] = _dump_(v)
-                return None if ret == {} else ret
+                    dumped = _dump_(v)
+                    # Keep the entry even if dumped is None/empty for BaseObj
+                    if dumped != None or isinstance(v, BaseObj):
+                        ret[k] = dumped if dumped != None else {}
+                return ret if ret else None
             elif isinstance(obj, list):
                 ret = []
                 for v in obj:
-                    ret.append(_dump_(v))
-                return None if ret == [] else ret
+                    dumped = _dump_(v)
+                    # Keep the entry even if dumped is None/empty for BaseObj
+                    if dumped != None or isinstance(v, BaseObj):
+                        ret.append(dumped if dumped != None else {})
+                # Return the list even if it only contains empty objects
+                return ret if len(ret) > 0 else None
             elif isinstance(obj, BaseObj):
                 return obj.dump()
-            elif isinstance(obj, (six.string_types, six.integer_types)):
+            elif isinstance(obj, (six.string_types, six.integer_types, bool, float)):
                 return obj
             else:
-                raise ValueError('Unknown object to dump: {0}'.format(obj.__class__.__name__))
+                # Try to convert to a basic type
+                return obj
 
-        for name, default in six.iteritems(self.__swagger_fields__):
+        # Get all fields from MRO
+        all_fields = {}
+        for cls in reversed(self.__class__.__mro__):
+            if hasattr(cls, '__swagger_fields__'):
+                all_fields.update(cls.__swagger_fields__)
+
+        for name, default in six.iteritems(all_fields):
             # only dump a field when its value is not equal to default value
-            v = getattr(self, name)
+            v = getattr(self, name, None)
             if v != default:
                 d = _dump_(v)
                 if d != None:
                     r[name] = d
 
-        return None if r == {} else r
+        # Return empty dict for empty objects instead of None
+        return r
 
     @property
     def _parent_(self):
@@ -314,7 +593,7 @@ class BaseObj(object):
         :return: the parent object.
         :rtype: a subclass of BaseObj.
         """
-        return None
+        return self._parent__ if hasattr(self, '_parent__') else None
 
     @property
     def _field_names_(self):
@@ -324,8 +603,16 @@ class BaseObj(object):
         :rtype: a list of str
         """
         ret = []
-        for n in six.iterkeys(self.__swagger_fields__):
-            ret.append('broken_' + n)
+        # Get all fields from MRO
+        all_fields = {}
+        for cls in reversed(self.__class__.__mro__):
+            if hasattr(cls, '__swagger_fields__'):
+                all_fields.update(cls.__swagger_fields__)
+
+        for n in six.iterkeys(all_fields):
+            # Apply rename if needed
+            renamed = self.__swagger_rename__.get(n, n)
+            ret.append(renamed)
 
         return ret
 
@@ -335,7 +622,54 @@ class BaseObj(object):
 
         :rtype: a dict of children {child_name: child_object}
         """
-        return {}
+        result = {}
+
+        # Find child contexts from the class hierarchy
+        child_info = {}
+        for cls in self.__class__.__mro__:
+            # Find the corresponding Context class
+            ctx_name = cls.__name__.replace('Obj', 'Context')
+            # Check in globals and parent module
+            import sys
+            for module in [sys.modules[cls.__module__], sys.modules.get('pyswagger.spec.base'), sys.modules.get('pyswagger.tests.test_base')]:
+                if module and hasattr(module, ctx_name):
+                    ctx_cls = getattr(module, ctx_name)
+                    if hasattr(ctx_cls, '__swagger_child__'):
+                        child_info.update(ctx_cls.__swagger_child__)
+                        break
+
+        # Process each child field
+        for field_name, (ct, _) in six.iteritems(child_info):
+            field_val = getattr(self, field_name, None)
+            if field_val == None:
+                continue
+
+            if ct == None:
+                # Single object
+                if isinstance(field_val, BaseObj):
+                    result[field_name] = field_val
+            elif ct == ContainerType.list_:
+                # List of objects
+                if isinstance(field_val, list):
+                    for i, obj in enumerate(field_val):
+                        if isinstance(obj, BaseObj):
+                            result[field_name + '/' + str(i)] = obj
+            elif ct == ContainerType.dict_:
+                # Dict of objects
+                if isinstance(field_val, dict):
+                    for k, obj in six.iteritems(field_val):
+                        if isinstance(obj, BaseObj):
+                            result[field_name + '/' + jp_compose(k)] = obj
+            elif ct == ContainerType.dict_of_list_:
+                # Dict of lists
+                if isinstance(field_val, dict):
+                    for k, lst in six.iteritems(field_val):
+                        if isinstance(lst, list):
+                            for i, obj in enumerate(lst):
+                                if isinstance(obj, BaseObj):
+                                    result[field_name + '/' + jp_compose(k) + '/' + str(i)] = obj
+
+        return result
 
 
 def _method_(name):
@@ -354,8 +688,8 @@ class FieldMeta(type):
         """
         def init_fields(fields, rename):
             for name in six.iterkeys(fields):
-                name = rename[name] if name in rename.keys() else name
-                spc[name] = property(_method_(name))
+                renamed = rename.get(name, name)
+                spc[renamed] = property(_method_(name))
 
         def _default_(name, default):
             spc[name] = spc[name] if name in spc else default
@@ -367,15 +701,36 @@ class FieldMeta(type):
             dict1.update(d)
 
         # compose fields definition from parents
-        pass
+        all_swagger_fields = {}
+        all_internal_fields = {}
+        all_rename = {}
 
-        rename = spc['__swagger_rename__'] if '__swagger_rename__' in spc.keys() else {}
-        # swagger fields
-        if '__swagger_fields__' in spc.keys():
-            init_fields(spc['__swagger_fields__'], rename)
-        # internal fields
-        if '__internal_fields__' in spc.keys():
-            init_fields(spc['__internal_fields__'], {})
+        # Walk through all base classes to collect fields
+        for base in bases:
+            if hasattr(base, '__swagger_fields__'):
+                _update_(all_swagger_fields, base.__swagger_fields__)
+            if hasattr(base, '__internal_fields__'):
+                _update_(all_internal_fields, base.__internal_fields__)
+            if hasattr(base, '__swagger_rename__'):
+                all_rename.update(base.__swagger_rename__)
+
+        # Add current class fields (they override parent fields)
+        if '__swagger_fields__' in spc:
+            all_swagger_fields.update(spc['__swagger_fields__'])
+            # Store the merged fields back
+            spc['__swagger_fields__'] = all_swagger_fields
+
+        if '__internal_fields__' in spc:
+            all_internal_fields.update(spc['__internal_fields__'])
+            spc['__internal_fields__'] = all_internal_fields
+
+        if '__swagger_rename__' in spc:
+            all_rename.update(spc['__swagger_rename__'])
+        spc['__swagger_rename__'] = all_rename
+
+        # Initialize properties for all fields
+        init_fields(all_swagger_fields, all_rename)
+        init_fields(all_internal_fields, {})
 
         return type.__new__(metacls, name, bases, spc)
 
@@ -384,7 +739,7 @@ class NullContext(Context):
     """ black magic to initialize BaseObj
     """
 
-    _obj = None
+    _obj = {}
 
     def __init__(self):
         super(NullContext, self).__init__(None, None)

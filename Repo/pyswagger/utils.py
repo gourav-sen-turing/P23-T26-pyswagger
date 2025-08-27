@@ -16,6 +16,7 @@ def scope_compose(scope, name, sep=private.SCOPE_SEPARATOR):
 
     :param str scope: current scope
     :param str name: name of next level in scope
+    :param str sep: scope separator
     :return the composed scope
     """
 
@@ -31,8 +32,9 @@ def scope_compose(scope, name, sep=private.SCOPE_SEPARATOR):
 
 def scope_split(scope, sep=private.SCOPE_SEPARATOR):
     """ split a scope into names
-    
+
     :param str scope: scope to be splitted
+    :param str sep: scope separator
     :return: list of str for scope names
     """
 
@@ -43,169 +45,191 @@ class ScopeDict(dict):
     """ ScopeDict
     """
     def __init__(self, *a, **k):
-        self.__sep = private.SCOPE_SEPARATOR
+        self.__sep = k.pop('sep', private.SCOPE_SEPARATOR)
         super(ScopeDict, self).__init__(*a, **k)
 
     @property
     def sep(self):
-        """ separator property
-        """
-        raise TypeError('sep property is write-only')
+        return self.__sep
 
     @sep.setter
     def sep(self, sep):
-        """ update separater used here
-        """
         self.__sep = sep
 
     def __getitem__(self, *keys):
-        """ to access an obj with key: 'n!##!m...!##!z', caller can pass as key:
-        - n!##!m...!##!z
-        - n, m, ..., z
-        - z
-        when separater == !##!
-
-        :param dict keys: keys to access via scopes.
         """
-        k = six.moves.reduce(lambda k1, k2: scope_compose(k1, k2, sep=self.__sep), keys[0]) if isinstance(keys[0], tuple) else keys[0]
-        try:
-            return super(ScopeDict, self).__getitem__(k)
-        except KeyError as e:
-            ret = []
-            for ik in self.keys():
-                if ik.endswith(k):
-                    ret.append(ik)
-            if len(ret) == 1:
-                return super(ScopeDict, self).__getitem__(ret[0])
-            elif len(ret) > 1:
-                raise ValueError('Multiple occurrence of key: {0}'.format(k))
+        """
+        def __get_item(k):
+            k = scope_compose(None, k, sep=self.sep) if isinstance(k, tuple) else k
 
-            raise e
+            # find the key that match the full name
+            if k in self:
+                return dict.__getitem__(self, k)
+
+            # find the key that match the part of name from the bottom.
+            # for example,
+            # full name: 'a!b!c'
+            # partial name: 'b!c', 'c'
+            keys = [key for key in six.iterkeys(self) if key.endswith(k)]
+            if len(keys) == 1:
+                return dict.__getitem__(self, keys[0])
+            elif len(keys) > 1:
+                raise ValueError('Multiple occurrence of key: ' + k)
+            else:
+                raise ValueError('Unable to find key: ' + k)
+
+        if len(keys) == 1:
+            keys = keys[0]
+
+        if isinstance(keys, tuple):
+            # keys is a tuple when used with nested dict,
+            # ex. ScopeDict['a']['b']['c'].
+            # keys[0] is useless for us here.
+            return __get_item(keys[-1])
+        else:
+            return __get_item(keys)
 
 
-class CycleGuard(object):
-    """ Guard for cycle detection
-    """
+class CaseInsensitiveDict(dict):
+    """ CaseInsensitive dict """
 
-    def __init__(self, identity_hook=id):
-        self.__visited = []
-        self.__hook = identity_hook
+    def __init__(self, *a, **k):
+        super(CaseInsensitiveDict, self).__init__()
+        tmp = dict(*a, **k) if a else k
+        for key, value in six.iteritems(tmp):
+            self[key.lower()] = value
 
-    def update(self, obj):
-        i = self.__hook(obj)
-        if i in self.__visited:
-            raise CycleDetectionError('Cycle detected: {0}'.format(obj.__repr__()))
-        self.__visited.append(i)
+    def __contains__(self, k):
+        return super(CaseInsensitiveDict, self).__contains__(k.lower())
 
+    def __delitem__(self, k):
+        return super(CaseInsensitiveDict, self).__delitem__(k.lower())
+
+    def __getitem__(self, k):
+        return super(CaseInsensitiveDict, self).__getitem__(k.lower())
+
+    def __setitem__(self, k, v):
+        return super(CaseInsensitiveDict, self).__setitem__(k.lower(), v)
+
+    def get(self, k, *default):
+        return super(CaseInsensitiveDict, self).get(k.lower(), *default)
+
+
+_iso8601_fmt = re.compile(''.join([
+    r'(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})', # YYYY-MM-DD
+    r'(T|t|\ )',  # T or space
+    r'(?P<hour>\d{2}):(?P<minute>\d{2})(:(?P<second>\d{1,2}))?', # hh:mm:ss
+    r'(?P<tz>Z|[+-]\d{2}:\d{2})?' # Z or +/-hh:mm
+    ]))
+_iso8601_fmt_date = re.compile(r'(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})') # YYYY-MM-DD
 
 class FixedTZ(datetime.tzinfo):
-    """ tzinfo implementation without consideration of
-    daylight-saving-time.
-    """
-
-    def __init__(self, h=0, m=0):
+    """ tzinfo implementation without consideration of DST """
+    def __init__(self, h, m):
         self.__offset = datetime.timedelta(hours=h, minutes=m)
 
     def utcoffset(self, dt):
-        return self.__offset + self.dst(dt)
+        return self.__offset
 
     def tzname(self, dt):
-        return "UTC"
+        return 'UTC' + str(self.__offset)
 
     def dst(self, dt):
+        # a fixed-offset class:  doesn't account for DST
         return datetime.timedelta(0)
 
-_iso8601_fmt = re.compile(''.join([
-    '(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})', # YYYY-MM-DD
-    'T', # T
-    '(?P<hour>\d{2}):(?P<minute>\d{2})(:(?P<second>\d{1,2}))?', # hh:mm:ss
-    '(?P<tz>Z|[+-]\d{2}:\d{2})?' # Z or +/-hh:mm
-]))
-_iso8601_fmt_date = re.compile('(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})') # YYYY-MM-DD
+    def __repr__(self):
+        return 'FixedTZ(hours={0}, minutes={1})'.format(self.__offset.seconds // 3600, self.__offset.seconds % 60)
 
 def from_iso8601(s):
-    """ convert iso8601 string to datetime object.
-    refer to http://xml2rfc.ietf.org/public/rfc/html/rfc3339.html#anchor14
-    for details.
+    """ convert iso8601 string to datetime object
 
-    :param str s: time in ISO-8601
+    :param s: iso8601 string
+    :type s: str
+    :return: datetime object
     :rtype: datetime.datetime
     """
     m = _iso8601_fmt.match(s)
     if not m:
         m = _iso8601_fmt_date.match(s)
+        if not m:
+            raise ValueError('Unable to convert [{0}] to datetime object'.format(s))
+        return datetime.datetime(year=int(m.group('year')), month=int(m.group('month')), day=int(m.group('day')))
 
-    if not m:
-        raise ValueError('not a valid iso 8601 format string:[{0}]'.format(s))
-
-    g = m.groupdict()
-
-    def _default_zero(key):
-        v = g.get(key, None)
-        return int(v) if v else 0
-
-    def _default_none(key):
-        v = g.get(key, None)
-        return int(v) if v else None
-
-    year = _default_zero('year')
-    month = _default_zero('month')
-    day = _default_zero('day')
-    hour = _default_none('hour')
-    minute = _default_none('minute')
-    second = _default_none('second')
-    tz_s = g.get('tz')
-
-    if not (year and month and day):
-        raise ValueError('missing y-m-d: [{0}]'.format(s))
-
-    # only date part, time part is none
-    if hour == None and minute == None and second == None:
-        return datetime.datetime(year, month, day)
-
-    # prepare tz info
     tz = None
-    if tz_s:
-        if not (hour and minute):
-            raise ValueError('missing h:m when tzinfo is provided: [{0}]'.format(s))
+    if m.group('tz') and m.group('tz') != 'Z':
+        neg = m.group('tz').startswith('-')
+        h, m = m.group('tz')[1:].split(':')
 
-        negtive = hh = mm = 0
-
-        if tz_s != 'Z':
-            negtive = -1 if tz_s[0] == '-' else 1
-            hh = int(tz_s[1:3])
-            mm = int(tz_s[4:6]) if len(tz_s) > 5 else 0
-
-        tz = FixedTZ(h=hh*negtive, m=mm*negtive)
+        tz = FixedTZ((-1 if neg else 1) * int(h), int(m))
+    elif m.group('tz') == 'Z':
+        tz = FixedTZ(0, 0)
 
     return datetime.datetime(
-        year=year,
-        month=month,
-        day=day,
-        hour=hour or 0,
-        minute=minute or 0,
-        second=second or 0,
+        year=int(m.group('year')),
+        month=int(m.group('month')),
+        day=int(m.group('day')),
+        hour=int(m.group('hour')),
+        minute=int(m.group('minute')),
+        second=int(m.group('second')) if m.group('second') else 0,
         tzinfo=tz
     )
 
+def get_dict_as_tuple(d):
+    """ get a dict of one element as tuple
+
+    :param d: a dict object
+    :type d: dict
+    :return: (key, value) of the only element, or (None, None) when list is not composed by only one element.
+    :rtype: tuple of two elements
+    """
+    if isinstance(d, dict) and len(d) == 1:
+        for k, v in six.iteritems(d):
+            return k, v
+
+    return None, None
+
+def nv_tuple_list_replace(x, v):
+    """ replace or append a tuple in a list of tuples
+
+    :param x: list of tuples, should be a list of (name, value) pair,
+                the first element of each tuple is the key for searching.
+    :type x: list of tuple
+    :param v: the tuple to be replaced or appended.
+    :type v: tuple
+    :raises ValueError: if x is not a list, or v is not a tuple
+    """
+    if not isinstance(x, list):
+        raise ValueError('x should be a list but got {0}'.format(str(type(x))))
+    if not isinstance(v, tuple):
+        raise ValueError('v should be a tuple but got {0}'.format(str(type(v))))
+
+    for i, t in enumerate(x):
+        if t[0] == v[0]:
+            x[i] = v
+            return
+
+    x.append(v)
+
 def import_string(name):
     """ import module
-    """
-    mod = fp = None
 
-    # code below, please refer to 
-    #   https://docs.python.org/2/library/imp.html
-    # for details
+    :param name: module name
+    :type name: str
+    :return: module, or None if not found
+    """
     try:
+        # existing in sys.modules
         return sys.modules[name]
     except KeyError:
         pass
 
+    fp = None
     try:
         fp, pathname, desc = imp.find_module(name)
         mod = imp.load_module(name, fp, pathname, desc)
     except ImportError:
-        mod = None 
+        mod = None
     finally:
         # Since we may exit via an exception, close fp explicitly.
         if fp:
@@ -248,147 +272,195 @@ def jr_split(s):
 
 def deref(obj):
     """ dereference $ref
+
+    :param obj: object to be dereferenced
+    :return: (is_success, deref_obj, ref_obj),
+            is_success: True if dereference successfully,
+            deref_obj is the object to be replaces,
+            ref_obj is the object to be referred.
     """
-    cur, guard = obj, CycleGuard()
-    while cur and getattr(cur, 'ref_obj', None) != None:
-        # cycle guard
-        guard.update(cur)
+    is_success = True
+    deref_obj = None
+    ref_obj = obj
 
-        cur = cur.ref_obj
-    return cur
+    if obj == None:
+        is_success = False
+    else:
+        try:
+            while getattr(ref_obj, '$ref'):
+                ref_obj = getattr(ref_obj, '$ref')
+            deref_obj = obj
+        except AttributeError:
+            # the object without $ref means itself.
+            pass
 
-def get_dict_as_tuple(d):
-    """ get the first item in dict,
-    and return it as tuple.
+    return is_success, deref_obj, ref_obj
+
+
+class CycleGuard(object):
+    """ Guard against cycle visiting, this object
+    would raise an exception when visiting an object
+    twice.
     """
-    for k, v in six.iteritems(d):
-        return k, v
-    return None
+    def __init__(self, identity_hook=None):
+        """ constructor
 
-def nv_tuple_list_replace(l, v):
-    """ replace a tuple in a tuple list
-    """
-    _found = False
-    for i, x in enumerate(l):
-        if x[0] == v[0]:
-            l[i] = v
-            _found = True
+        :param identity_hook: hook to get identity from object
+        :type identity_hook: func
+        """
+        self.visited = []
+        self.__identity = identity_hook or (lambda x: x)
 
-    if not _found:
-        l.append(v)
+    def update(self, obj):
+        """ add an object to visited list
+
+        :param obj: object to be visited
+        :raises CycleDetectionError: if obj already in visited list, would raise this exception.
+        """
+        i = self.__identity(obj)
+        if i and i in self.visited:
+            raise CycleDetectionError('Cycle detected: {0}'.format(repr(i[:70])))
+        self.visited.append(i)
+
 
 def path2url(p):
     """ Return file:// URL from a filename.
     """
-    return six.moves.urllib.parse.urljoin(
-        'file:', six.moves.urllib.request.pathname2url(p)
-    )
+    return 'file://' + p
+
 
 def normalize_url(url):
     """ Normalize url
+
+    :param str url: url to be normalized
+    :return: normalized url
+    :rtype: str
     """
-    if not url:
+    if url == None or url == '':
         return url
 
     p = six.moves.urllib.parse.urlparse(url)
     if p.scheme == '':
-        if p.netloc == '' and p.path != '':
-            # it should be a file path
+        if os.path.exists(url):
+            url = six.moves.urllib.parse.quote(url.encode('utf-8'))
             url = path2url(os.path.abspath(url))
         else:
-            raise ValueError('url should be a http-url or file path -- ' + url)
+            # it should be a relative file
+            url = six.moves.urllib.parse.quote(url.encode('utf-8'))
+            url = path2url(os.path.join(os.getcwd(), url))
+
+    # remove trailing '/'
+    p = six.moves.urllib.parse.urlparse(url)
+    if p.path != '/' and p.path.endswith('/'):
+        url = six.moves.urllib.parse.urlunparse(p[:2]+(p.path[:-1],)+p[3:])
 
     return url
 
-def normalize_jr(jr, prefix, url=None):
-    """ normalize JSON reference, also fix
-    implicit reference of JSON pointer.
-    input:
-    - User
-    - #/definitions/User
-    - http://test.com/swagger.json#/definitions/User
-    output:
-    - http://test.com/swagger.json#/definitions/User
+
+def normalize_jr(jr, header, url=None):
+    """ JSON reference normalization
+
+    :param str jr: JSON reference
+    :param str header: the header for JSON reference.
+    :param str url: the url of the Swagger App.
+    :return: normalized JSON reference, ex. http://my.domain.com/app#/definitions/User
+    :rtype: str
     """
 
     if jr == None:
         return jr
 
-    p = six.moves.urllib.parse.urlparse(jr)
-    if p.scheme != '':
+    if jr.startswith('#'):
+        if url:
+            return ''.join([url, jr])
+        else:
+            return jr
+    elif jr.startswith('http'):
         return jr
+    else:
+        if url:
+            return ''.join([url, header, '/', jr])
+        else:
+            return ''.join([header, '/', jr]) if header else jr
 
-    # it's a JSON reference without url
-
-    # fix implicit reference
-    jr = jp_compose(jr, base=prefix) if jr.find('#') == -1 else jr
-
-    # prepend url
-    if url:
-        p = six.moves.urllib.parse.urlparse(url)
-        # remember to remove the heading '#'
-        jr = six.moves.urllib.parse.urlunparse(p[:5]+(jr[1:],))
-
-    return jr
-
-def is_file_url(url):
-    return url.startswith('file://')
 
 def get_swagger_version(obj):
-    """ get swagger version from loaded json """
+    """ Get swagger version from loaded json
 
-    if isinstance(obj, dict):
-        if 'swaggerVersion' in obj:
-            return obj['swaggerVersion']
-        elif 'swagger' in obj:
-            return obj['swagger']
-        return None
-    else:
-        # should be an instance of BaseObj
-        return obj.swaggerVersion if hasattr(obj, 'swaggerVersion') else obj.swagger
-
-def walk(start, ofn, cyc=None):
-    """ Non recursive DFS to detect cycles
-
-    :param start: start vertex in graph
-    :param ofn: function to get the list of outgoing edges of a vertex
-    :param cyc: list of existing cycles, cycles are represented in a list started with minimum vertex.
-    :return: cycles
-    :rtype: list of lists
+    :param dict obj: loaded json
+    :return: swagger version, ex. 1.2, 2.0
+    :rtype: str
     """
-    ctx, stk = {}, [start]
-    cyc = [] if cyc == None else cyc
+    if 'swaggerVersion' in obj:
+        return obj['swaggerVersion']
+    elif 'swagger' in obj:
+        return obj['swagger']
+    else:
+        return None
 
-    while len(stk):
-        top = stk[-1]
 
-        if top not in ctx:
-            ctx.update({top:list(ofn(top))})
+def walk(start, g, ret=None):
+    """ DFS """
+    ret = [] if ret == None else ret
+    if not start:
+        return ret
 
-        if len(ctx[top]):
-            n = ctx[top][0]
-            if n in stk:
-                # cycles found,
-                # normalize the representation of cycles,
-                # start from the smallest vertex, ex.
-                # 4 -> 5 -> 2 -> 7 -> 9 would produce
-                # (2, 7, 9, 4, 5)
-                nc = stk[stk.index(n):]
-                ni = nc.index(min(nc))
-                nc = nc[ni:] + nc[:ni] + [min(nc)]
-                if nc not in cyc:
-                    cyc.append(nc)
+    # init stack and result
+    stack = [start]
+    visited = []
+    sequences = []
 
-                ctx[top].pop(0)
-            else:
-                stk.append(n)
+    while stack:
+        # take the last one ...
+        current = stack[-1]
+
+        # keep walking ...
+        if not current in visited:
+            # mark as visited
+            visited.append(current)
+            sequences.append(current)
+
+            # get next obj to visit
+            next_objs = g(current)
+            for obj in next_objs if next_objs else []:
+                if not obj in visited:
+                    stack.append(obj)
         else:
-            ctx.pop(top)
-            stk.pop()
-            if len(stk):
-                ctx[stk[-1]].remove(top)
+            # there is no way to walk, pop it
+            stack.pop()
+            if sequences and sequences[-1] == current:
+                sequences.pop()
 
-    return cyc
+            # a cycle is detected
+            if current in sequences:
+                idx = sequences.index(current)
+                cyc = sequences[idx:] + [current]
+
+                # check if this cycle already detected
+                # note that we only need to check cycles with
+                # same length
+                duplicated = False
+                for r in ret:
+                    if len(r) != len(cyc):
+                        continue
+
+                    # we need to avoid adding duplicated cycles,
+                    # ex. [1, 2, 3, 1] and [2, 3, 1, 2] are
+                    # duplicated.
+                    idx = cyc.index(min(cyc))
+                    cyc_min = cyc[idx:-1] + cyc[:idx] + [min(cyc)]
+
+                    idx = r.index(min(r))
+                    r_min = r[idx:-1] + r[:idx] + [min(r)]
+
+                    duplicated = cyc_min == r_min
+                    if duplicated:
+                        break
+
+                if not duplicated:
+                    ret.append(cyc)
+
+    return ret
 
 
 def _diff_(src, dst, ret=None, jp=None, exclude=[], include=[]):
@@ -400,9 +472,81 @@ def _diff_(src, dst, ret=None, jp=None, exclude=[], include=[]):
     - when src is dict or list, and dst is not: (jp, type(src), type(dst))
     - other: (jp, src, dst)
     """
-    return [('/', 'everything', 'different')]
+    jp = jp or ''
+    if ret is None:
+        ret = []
+
+    # Apply filters only at the top level (when jp has no '/')
+    if jp and '/' not in jp and (include or exclude):
+        # Check exclude list
+        if exclude and jp in exclude:
+            return ret
+
+        # Check include list (only if include list is not empty)
+        if include and jp not in include:
+            return ret
+
+    if isinstance(src, dict) and isinstance(dst, dict):
+        # Compare dict keys
+        src_keys = set(src.keys())
+        dst_keys = set(dst.keys())
+
+        # Missing keys in dst
+        for k in src_keys - dst_keys:
+            if (not exclude or k not in exclude) and (not include or k in include):
+                ret.append((jp + '/' + k if jp else k, None, None))
+
+        # Extra keys in dst
+        for k in dst_keys - src_keys:
+            if (not exclude or k not in exclude) and (not include or k in include):
+                ret.append((jp + '/' + k if jp else k, None, None))
+
+        # Compare common keys
+        for k in src_keys & dst_keys:
+            # At top level, check include/exclude
+            if not jp:  # Top level
+                if exclude and k in exclude:
+                    continue
+                if include and k not in include:
+                    continue
+            # For nested levels, we've already filtered at top, so process everything
+            _diff_(src[k], dst[k], ret, jp + '/' + k if jp else k, [], [])
+
+    elif isinstance(src, list) and isinstance(dst, list):
+        # Compare list lengths
+        if len(src) != len(dst):
+            ret.append((jp, len(src), len(dst)))
+
+        # Compare elements only if same length
+        elif len(src) == len(dst):
+            for i in range(len(src)):
+                _diff_(src[i], dst[i], ret, jp + '/' + str(i) if jp else str(i), exclude, include)
+
+    elif type(src) != type(dst):
+        # Type mismatch
+        ret.append((jp, type(src).__name__, type(dst).__name__))
+    elif src != dst:
+        # Value difference
+        ret.append((jp, src, dst))
 
     return ret
 
-def get_or_none(obj, *a):
-    return None
+
+def get_or_none(obj, *args):
+    """ Navigate nested attributes safely, returning None if any attribute doesn't exist
+
+    :param obj: the root object
+    :param args: sequence of attribute names to navigate
+    :return: the final attribute value or None if navigation fails
+    """
+    if obj == None:
+        return None
+
+    current = obj
+    for attr in args:
+        try:
+            current = getattr(current, attr)
+        except AttributeError:
+            return None
+
+    return current
