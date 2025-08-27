@@ -408,6 +408,8 @@ class SwaggerApp(object):
         :rtype: dict
         :return: dict representation of Swagger
         """
+        if self.root and hasattr(self.root, 'dump'):
+            return self.root.dump()
         return {}
 
 

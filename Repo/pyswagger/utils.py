@@ -400,9 +400,78 @@ def _diff_(src, dst, ret=None, jp=None, exclude=[], include=[]):
     - when src is dict or list, and dst is not: (jp, type(src), type(dst))
     - other: (jp, src, dst)
     """
-    return [('/', 'everything', 'different')]
+    if ret is None:
+        ret = []
+    if jp is None:
+        jp = ''
+
+    # Apply include/exclude filters
+    if jp:
+        parts = jp.split('/')
+        if parts and parts[0]:
+            if include and parts[0] not in include:
+                return ret
+            if exclude and parts[0] in exclude:
+                return ret
+
+    # Handle None values
+    if src is None and dst is None:
+        return ret
+
+    # Type mismatch (including None)
+    if type(src) != type(dst):
+        if isinstance(src, (list, dict)) or isinstance(dst, (list, dict)):
+            ret.append((jp, type(src).__name__, type(dst).__name__))
+        else:
+            ret.append((jp, src, dst))
+        return ret
+
+    # Compare lists
+    if isinstance(src, list):
+        if len(src) != len(dst):
+            ret.append((jp, len(src), len(dst)))
+        else:
+            for i, (s, d) in enumerate(zip(src, dst)):
+                _diff_(s, d, ret, jp + '/' + str(i) if jp else str(i), exclude, include)
+
+    # Compare dicts
+    elif isinstance(src, dict):
+        src_keys = set(src.keys())
+        dst_keys = set(dst.keys())
+
+        # Check for different keys
+        for k in src_keys - dst_keys:
+            # JSON pointer encode the key
+            encoded_k = k.replace('~', '~0').replace('/', '~1')
+            ret.append((jp + '/' + encoded_k if jp else encoded_k, None, None))
+        for k in dst_keys - src_keys:
+            # JSON pointer encode the key
+            encoded_k = k.replace('~', '~0').replace('/', '~1')
+            ret.append((jp + '/' + encoded_k if jp else encoded_k, None, None))
+
+        # Compare common keys
+        for k in src_keys & dst_keys:
+            # JSON pointer encode the key
+            encoded_k = k.replace('~', '~0').replace('/', '~1')
+            _diff_(src[k], dst[k], ret, jp + '/' + encoded_k if jp else encoded_k, exclude, include)
+
+    # Compare primitives
+    elif src != dst:
+        ret.append((jp, src, dst))
 
     return ret
 
 def get_or_none(obj, *a):
-    return None
+    """ Navigate through object attributes safely, returning None if any attribute doesn't exist
+
+    :param obj: the root object
+    :param a: attribute names to navigate through
+    :return: the final attribute value or None if navigation fails
+    """
+    current = obj
+    for attr in a:
+        if hasattr(current, attr):
+            current = getattr(current, attr)
+        else:
+            return None
+    return current

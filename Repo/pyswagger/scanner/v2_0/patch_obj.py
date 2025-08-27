@@ -38,8 +38,13 @@ class PatchObject(object):
                     obj.update_field('parameters', copy.copy(obj._parent_.parameters))
 
         # schemes
-        # Modified: Always set empty cached_schemes to break test_operation_scheme
-        obj.update_field('cached_schemes', [])
+        if obj.schemes == None or (isinstance(obj.schemes, list) and len(obj.schemes) == 0):
+            if app.root and hasattr(app.root, 'schemes') and app.root.schemes:
+                obj.update_field('cached_schemes', app.root.schemes)
+            else:
+                obj.update_field('cached_schemes', [])
+        else:
+            obj.update_field('cached_schemes', obj.schemes)
 
     @Disp.register([PathItem])
     def _path_item(self, path, obj, app):
