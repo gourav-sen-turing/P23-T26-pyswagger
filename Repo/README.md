@@ -168,3 +168,43 @@ python -m pytest -s -v --cov=pyswagger --cov-config=.coveragerc --cov-report=htm
   - 'different host for different resource' is no longer supported in Swagger 2.0, only one host and one basePath is allowed in one swagger.json.
   - refer to [Migration Guide](https://github.com/swagger-api/swagger-spec/wiki/Swagger-1.2-to-2.0-Migration-Guide) from Swagger team.
   - The name of body parameters is no longer included in requests, refer to this [issue](https://github.com/mission-liao/pyswagger/issues/13) for details.
+
+
+# Turn 1: Model B response
+
+## Summary
+
+Based on my analysis of the failing tests in the pyswagger repository, here's my understanding and proposed approach:
+
+### Key Requirements from Failing Tests:
+
+1. **BaseObj and Context Infrastructure Issues:**
+- Parent-child relationships (`_parent_` and `_children_` attributes) are not properly maintained
+- Field inheritance through metaclasses is broken
+- The `merge()` method needs implementation to combine objects while preserving parent relationships
+- The `compare()` method is stubbed out and needs proper implementation
+- Field renaming through `__swagger_rename__` is not working correctly
+
+2. **Scope Separator Customization:**
+- The PR aims to make the scope separator configurable (currently hardcoded)
+- `ScopeDict` already has a `sep` setter but it needs to be propagated throughout
+- Need to add a `sep` parameter to `SwaggerApp` initialization
+
+3. **Utility Function Stubs:**
+- `get_or_none()` is returning None always - needs to traverse nested attributes safely
+- `_diff_()` is returning a hardcoded value - needs to properly compare objects/dicts/lists
+
+4. **Document Dumping and Conversion:**
+- The `dump()` method isn't preserving the distinction between None and empty collections
+- Missing attributes like `cached_schemes` on operations
+- Converter needs to preserve more fields (descriptions, license, contact info, OAuth2 flows)
+
+### Proposed Implementation Approach:
+
+1. **Start with BaseObj foundation** - Fix the core object model issues first since other features depend on it
+2. **Add configurable separator support** - Thread the `sep` parameter through the system
+3. **Implement utility functions** - These are needed by other components
+4. **Fix dump/conversion issues** - Ensure proper round-trip capability
+5. **Address converter field preservation** - Make sure all swagger fields are maintained
+
+The tests provide clear specifications for the expected behavior, making it straightforward to implement the fixes incrementally while ensuring each component works correctly.
